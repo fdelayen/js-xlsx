@@ -8823,6 +8823,7 @@ var XLSX = {};
   var colregex = /<col[^>]*\/>/g;
   /* 18.3 Worksheets */
   function parse_ws_xml(data, opts, rels) {
+
     if (!data) return data;
     /* 18.3.1.99 worksheet CT_Worksheet */
     var s = {};
@@ -8854,7 +8855,13 @@ var XLSX = {};
 
     /* 18.3.1.80 sheetData CT_SheetData ? */
     var mtch = data.match(sheetdataregex);
-    if (mtch) parse_ws_xml_data(mtch[1], s, opts, refguess);
+
+    if(XLSX.eagerReadFile && mtch) {
+      console.log('Pushing worksheet to eager list');
+      eagerList.push({mtch: mtch[1], opts: opts, refguess: refguess});
+    } else if (mtch) {
+      parse_ws_xml_data(mtch[1], s, opts, refguess);
+    }
 
     /* 18.3.1.48 hyperlinks CT_Hyperlinks */
     if (data.indexOf("</hyperlinks>") !== -1) parse_ws_xml_hlinks(s, data.match(hlinkregex), rels);
@@ -14402,6 +14409,140 @@ var XLSX = {};
     return cmds;
   }
 
+  /* Eager loading */
+  var parse_ws_xml_data_eager = (function parse_ws_xml_data_eager_factory() {
+    var cellregex = /<(?:\w+:)?c[ >]/, rowregex = /<\/(?:\w+:)?row>/;
+    var rregex = /r=["']([^"']*)["']/, isregex = /<is>([\S\s]*?)<\/is>/;
+    var match_v = matchtag("v"), match_f = matchtag("f");
+
+    return function parse_ws_xml_data_eager(sdata, s, opts, guess) {
+      var ri = 0, x = "", cells = [], cref = [], idx = 0, i = 0, cc = 0, d = "", p;
+      var tag, tagr = 0, tagc = 0;
+      var sstr;
+      var fmtid = 0, fillid = 0, do_format = Array.isArray(styles.CellXf), cf;
+      for (var marr = sdata.split(rowregex), mt = 0, marrlen = marr.length; mt != marrlen; ++mt) {
+        var eagerResult = [];
+        x = marr[mt].trim();
+        var xlen = x.length;
+        if (xlen === 0) continue;
+
+        /* 18.3.1.73 row CT_Row */
+        for (ri = 0; ri < xlen; ++ri) if (x.charCodeAt(ri) === 62) break;
+        ++ri;
+        tag = parsexmltag(x.substr(0, ri), true);
+        /* SpreadSheetGear uses implicit r/c */
+        tagr = typeof tag.r !== 'undefined' ? parseInt(tag.r, 10) : tagr + 1;
+        tagc = -1;
+        if (opts.sheetRows && opts.sheetRows < tagr) continue;
+        if (guess.s.r > tagr - 1) guess.s.r = tagr - 1;
+        if (guess.e.r < tagr - 1) guess.e.r = tagr - 1;
+
+        /* 18.3.1.4 c CT_Cell */
+        cells = x.substr(ri).split(cellregex);
+        for (ri = typeof tag.r === 'undefined' ? 0 : 1; ri != cells.length; ++ri) {
+          x = cells[ri].trim();
+          if (x.length === 0) continue;
+          cref = x.match(rregex);
+          idx = ri;
+          i = 0;
+          cc = 0;
+          x = "<c " + (x.substr(0, 1) == "<" ? ">" : "") + x;
+          if (cref !== null && cref.length === 2) {
+            idx = 0;
+            d = cref[1];
+            for (i = 0; i != d.length; ++i) {
+              if ((cc = d.charCodeAt(i) - 64) < 1 || cc > 26) break;
+              idx = 26 * idx + cc;
+            }
+            --idx;
+            tagc = idx;
+          } else ++tagc;
+          for (i = 0; i != x.length; ++i) if (x.charCodeAt(i) === 62) break;
+          ++i;
+          tag = parsexmltag(x.substr(0, i), true);
+          if (!tag.r) tag.r = utils.encode_cell({ r: tagr - 1, c: tagc });
+          d = x.substr(i);
+          p = { t: "" };
+
+          if ((cref = d.match(match_v)) !== null && cref[1] !== '') p.v = unescapexml(cref[1]);
+          if (opts.cellFormula && (cref = d.match(match_f)) !== null) p.f = unescapexml(cref[1]);
+
+          /* SCHEMA IS ACTUALLY INCORRECT HERE.  IF A CELL HAS NO T, EMIT "" */
+          if (tag.t === undefined && p.v === undefined) {
+            if (!opts.sheetStubs) continue;
+            p.t = "stub";
+          }
+          else p.t = tag.t || "n";
+          if (guess.s.c > idx) guess.s.c = idx;
+          if (guess.e.c < idx) guess.e.c = idx;
+          /* 18.18.11 t ST_CellType */
+          switch (p.t) {
+            case 'n':
+              p.v = parseFloat(p.v);
+              break;
+            case 's':
+              sstr = strs[parseInt(p.v, 10)];
+              p.v = sstr.t;
+              p.r = sstr.r;
+              if (opts.cellHTML) p.h = sstr.h;
+              break;
+            case 'str':
+              p.t = "s";
+              p.v = (p.v != null) ? utf8read(p.v) : '';
+              if (opts.cellHTML) p.h = p.v;
+              break;
+            case 'inlineStr':
+              cref = d.match(isregex);
+              p.t = 's';
+              if (cref !== null) {
+                sstr = parse_si(cref[1]);
+                p.v = sstr.t;
+              } else p.v = "";
+              break; // inline string
+            case 'b':
+              p.v = parsexmlbool(p.v);
+              break;
+            case 'd':
+              if (!opts.cellDates) {
+                p.v = datenum(p.v);
+                p.t = 'n';
+              }
+              break;
+            /* error string in .v, number in .v */
+            case 'e':
+              p.w = p.v;
+              p.v = RBErr[p.v];
+              break;
+          }
+          /* formatting */
+          fmtid = fillid = 0;
+          if (do_format && tag.s !== undefined) {
+            cf = styles.CellXf[tag.s];
+            if (cf != null) {
+              if (cf.numFmtId != null) fmtid = cf.numFmtId;
+              if (opts.cellStyles && cf.fillId != null) fillid = cf.fillId;
+            }
+          }
+          safe_format(p, fmtid, fillid, opts);
+          //s[tag.r] = p;
+          eagerResult[ri] = p.w;
+        }
+        s.push(eagerResult);
+      }
+    };
+  })();
+
+  var eagerList = [];
+
+  var eagerGetWorkSheet = function(n) {
+    if(eagerList[n]) {
+      var data = [];
+      parse_ws_xml_data_eager(eagerList[n].mtch, data, eagerList[n].opts, eagerList[n].refguess);
+      return data;
+    }
+    return [];
+  };
+
   var utils = {
     encode_col: encode_col,
     encode_row: encode_row,
@@ -14430,6 +14571,8 @@ var XLSX = {};
   XLSX.write = writeSync;
   XLSX.writeFile = writeFileSync;
   XLSX.writeFileSync = writeFileSync;
+  XLSX.eagerReadFile = false;
+  XLSX.eagerGetWorkSheet = eagerGetWorkSheet;
   XLSX.utils = utils;
   XLSX.CFB = CFB;
   XLSX.SSF = SSF;
