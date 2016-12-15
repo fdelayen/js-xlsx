@@ -8857,7 +8857,6 @@ var XLSX = {};
     var mtch = data.match(sheetdataregex);
 
     if(XLSX.eagerReadFile && mtch) {
-      console.log('Pushing worksheet to eager list');
       s.eagerObj = {mtch: mtch[1], opts: opts, refguess: refguess};
     } else if (mtch) {
       parse_ws_xml_data(mtch[1], s, opts, refguess);
