@@ -14524,7 +14524,7 @@ var XLSX = {};
           }
           safe_format(p, fmtid, fillid, opts);
           //s[tag.r] = p;
-          eagerResult[ri] = p.w;
+          eagerResult[idx] = p.w;
         }
         s.push(eagerResult);
       }
