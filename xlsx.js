@@ -8858,7 +8858,7 @@ var XLSX = {};
 
     if(XLSX.eagerReadFile && mtch) {
       console.log('Pushing worksheet to eager list');
-      eagerList.push({mtch: mtch[1], opts: opts, refguess: refguess});
+      s.eagerObj = {mtch: mtch[1], opts: opts, refguess: refguess};
     } else if (mtch) {
       parse_ws_xml_data(mtch[1], s, opts, refguess);
     }
@@ -14532,12 +14532,10 @@ var XLSX = {};
     };
   })();
 
-  var eagerList = [];
-
-  var eagerGetWorkSheet = function(n) {
-    if(eagerList[n]) {
+  var eagerGetWorkSheet = function(workbook, n) {
+    if(workbook && workbook.Sheets[n] && workbook.Sheets[n].eagerObj) {
       var data = [];
-      parse_ws_xml_data_eager(eagerList[n].mtch, data, eagerList[n].opts, eagerList[n].refguess);
+      parse_ws_xml_data_eager(workbook.Sheets[n].eagerObj.mtch, data, workbook.Sheets[n].eagerObj.opts, workbook.Sheets[n].eagerObj.refguess);
       return data;
     }
     return [];
